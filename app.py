@@ -398,8 +398,8 @@ if "results" in st.session_state and st.session_state.results:
         st.info("No tokens scored above the minimum threshold. Try lowering the Min Score Filter to 0.")
     else:
         for i, token in enumerate(results[:20], 1):
-            addr    = safe_get(token, 'token_address', 'address', 'contract', default='')
-        sym     = str(safe_get(token, "token_symbol", "symbol", "name", default="???"))
+                addr    = safe_get(token, 'token_address', 'address', 'contract', default='')
+            sym     = str(safe_get(token, "token_symbol", "symbol", "name", default="???"))
             chain   = token.get("_chain", token.get("chain", ""))
             score   = token["_score"]
             flow    = fmt_usd(safe_get(token, "netflow", "smart_money_net_flow_usd", "net_flow_usd", default=0))
