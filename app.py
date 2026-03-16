@@ -206,8 +206,7 @@ if run_clicked:
             netflow_map[addr] = nf
     all_tokens = []
     for t in screener_tokens:
-        if "_chain" not in t:
-            t["_chain"] = t.get("chain", selected_chains[0])
+        t["_chain"] = t.get("chain", t.get("_chain", "unknown"))
         t["_score"] = compute_score(t, netflow_map)
         all_tokens.append(t)
     results = sorted([t for t in all_tokens if t["_score"] >= min_score], key=lambda x: x["_score"], reverse=True)
