@@ -3,10 +3,14 @@
 Smart Money Divergence Detector
 ================================
 Uses the Nansen CLI to find tokens where Smart Money is accumulating
-while retail sentiment (price momentum) is negative — a classic alpha signal.
+while retail sentiment (price momentum) is negative.
 
 Chains: Ethereum, Solana, Base
 Alerts: Telegram
+
+CLI Commands Used:
+  nansen research token screener --chain <chain> --timeframe 24h
+  nansen research smart-money netflow --chain <chain>
 """
 
 import subprocess
@@ -16,11 +20,9 @@ import math
 import requests
 from datetime import datetime, timezone
 from config import (
-    NANSEN_API_KEY,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     TOP_N_RESULTS,
-    MIN_MARKET_CAP_USD,
     MIN_SMART_MONEY_TRADERS,
     CHAINS,
 )
@@ -31,130 +33,126 @@ from config import (
 
 def nansen(command: list[str]) -> dict | list:
     """Run a Nansen CLI command and return parsed JSON."""
-    full_cmd = ["nansen"] + command + ["--api-key", NANSEN_API_KEY, "--output", "json"]
+    full_cmd = ["nansen"] + command + ["--format", "json"]
     try:
-        result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
-            print(f"  [warn] CLI error: {result.stderr.strip()}")
+            err = result.stderr.strip() or result.stdout.strip()
+            print(f"  [warn] CLI error: {err[:120]}")
             return {}
-        return json.loads(result.stdout)
-    except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
-        print(f"  [warn] CLI call failed: {e}")
+        output = result.stdout.strip()
+        if not output:
+            return {}
+        return json.loads(output)
+    except subprocess.TimeoutExpired:
+        print(f"  [warn] CLI timed out: {' '.join(command)}")
+        return {}
+    except json.JSONDecodeError as e:
+        # Try to return raw stdout for debugging
+        print(f"  [warn] JSON parse error: {e}")
         return {}
 
 
 # ─────────────────────────────────────────────
-# 2. DATA FETCHING (each = 1 API call)
+# 2. DATA FETCHING
 # ─────────────────────────────────────────────
 
 def fetch_token_screener(chain: str) -> list[dict]:
-    """API call 1-3: Token screener per chain — Smart Money only."""
+    """Token screener per chain - Smart Money active tokens."""
     print(f"  📡 Token screener [{chain}]...")
     data = nansen([
-        "token", "screener",
-        "--chains", chain,
+        "research", "token", "screener",
+        "--chain", chain,
         "--timeframe", "24h",
-        "--only-smart-money",
-        "--min-market-cap", str(MIN_MARKET_CAP_USD),
-        "--per-page", "50",
     ])
-    return data.get("tokens", data) if isinstance(data, dict) else (data or [])
+    # Handle both list and dict responses
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        # Try common keys
+        for key in ["tokens", "data", "results", "items"]:
+            if key in data:
+                return data[key]
+    return []
 
 
 def fetch_smart_money_netflow(chain: str) -> list[dict]:
-    """API call 4-6: Smart money netflow per chain."""
+    """Smart money netflow per chain."""
     print(f"  📡 Smart money netflow [{chain}]...")
     data = nansen([
-        "smart-money", "netflow",
-        "--chains", chain,
-        "--timeframe", "24h",
-        "--include-labels", "Fund,Smart Trader,30D Smart Trader",
-        "--min-trader-count", str(MIN_SMART_MONEY_TRADERS),
-        "--per-page", "50",
-    ])
-    return data.get("tokens", data) if isinstance(data, dict) else (data or [])
-
-
-def fetch_token_holders(token_address: str, chain: str) -> dict:
-    """API call 7+: Token holder distribution for a specific token."""
-    print(f"  📡 Holders [{chain}:{token_address[:8]}...]")
-    data = nansen([
-        "token", "holders",
-        "--address", token_address,
+        "research", "smart-money", "netflow",
         "--chain", chain,
     ])
-    return data if isinstance(data, dict) else {}
-
-
-def fetch_pnl_leaderboard(chain: str) -> list[dict]:
-    """API call: PnL leaderboard to gauge retail momentum."""
-    print(f"  📡 PnL leaderboard [{chain}]...")
-    data = nansen([
-        "smart-money", "pnl-leaderboard",
-        "--chains", chain,
-        "--timeframe", "24h",
-        "--per-page", "20",
-    ])
-    return data.get("wallets", data) if isinstance(data, dict) else (data or [])
-
-
-def fetch_token_flows(token_address: str, chain: str) -> dict:
-    """API call: Detailed flow intelligence for a token."""
-    print(f"  📡 Token flows [{chain}:{token_address[:8]}...]")
-    data = nansen([
-        "token", "flows",
-        "--address", token_address,
-        "--chain", chain,
-        "--timeframe", "24h",
-    ])
-    return data if isinstance(data, dict) else {}
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ["tokens", "data", "results", "items", "flows"]:
+            if key in data:
+                return data[key]
+    return []
 
 
 # ─────────────────────────────────────────────
 # 3. DIVERGENCE SCORING ENGINE
 # ─────────────────────────────────────────────
 
+def safe_get(d: dict, *keys, default=0):
+    """Try multiple key names, return first match."""
+    for k in keys:
+        val = d.get(k)
+        if val is not None:
+            return val
+    return default
+
+
 def compute_divergence_score(token: dict, netflow_map: dict) -> float:
     """
-    Divergence Index (0–100):
-      40pts — Smart Money net flow (positive = accumulating)
-      30pts — Price momentum (negative = retail fear = opportunity)
-      20pts — Smart Money trader count (more = stronger signal)
-      10pts — Holder concentration penalty (high whale = risky)
+    Divergence Index (0-100):
+      40pts  Smart Money net flow (positive = accumulating)
+      30pts  Price momentum (negative price = retail fear = opportunity)
+      20pts  Smart Money trader count
+      10pts  Holder concentration (lower = safer)
     """
     score = 0.0
-    symbol = token.get("symbol", "???")
-    address = token.get("address", "")
+
+    address = safe_get(token, "address", "token_address", "contract", default="")
 
     # --- Smart Money Netflow (40 pts) ---
     nf = netflow_map.get(address, {})
-    net_flow_usd = nf.get("net_flow_24h_usd", token.get("smart_money_net_flow_usd", 0)) or 0
+    net_flow_usd = safe_get(nf, "net_flow_usd", "netflow_usd", "net_flow_24h_usd",
+                            default=safe_get(token, "smart_money_net_flow_usd",
+                                            "netflow_usd", "net_flow_usd", default=0))
+    net_flow_usd = net_flow_usd or 0
     if net_flow_usd > 0:
-        # Log scale: $10k → 10pts, $100k → 20pts, $1M → 30pts, $10M → 40pts
-        flow_score = min(40, max(0, (math.log10(max(net_flow_usd, 1)) - 4) * 10))
+        flow_score = min(40, max(0, (math.log10(max(net_flow_usd, 1)) - 3) * 13.3))
         score += flow_score
 
-    # --- Price Momentum (30 pts) — negative price = retail fear ---
-    price_change = token.get("price_change_24h_pct", token.get("price_change_pct", 0)) or 0
+    # --- Price Momentum (30 pts) ---
+    price_change = safe_get(token, "price_change_24h_pct", "price_change_pct",
+                            "price_change_percentage_24h", "priceChange24h", default=0)
+    price_change = price_change or 0
     if price_change < 0:
-        # Deeper dip while SM buys = stronger divergence
         momentum_score = min(30, abs(price_change) * 1.5)
         score += momentum_score
     elif price_change < 5:
-        score += 5  # Flat price with SM buying = mild signal
+        score += 5
 
     # --- Smart Money Trader Count (20 pts) ---
-    sm_traders = token.get("smart_money_trader_count", token.get("nof_smart_money_traders", 0)) or 0
-    trader_score = min(20, sm_traders * 2)
-    score += trader_score
+    sm_traders = safe_get(token, "smart_money_trader_count", "nof_smart_money_traders",
+                          "smartMoneyTraders", "sm_traders", default=0)
+    sm_traders = sm_traders or 0
+    if sm_traders >= MIN_SMART_MONEY_TRADERS:
+        trader_score = min(20, sm_traders * 2)
+        score += trader_score
 
-    # --- Holder Concentration Penalty (10 pts) ---
-    top10_pct = token.get("top_10_holder_pct", 50) or 50
+    # --- Holder Concentration (10 pts) ---
+    top10_pct = safe_get(token, "top_10_holder_pct", "top10HolderPct",
+                         "top_10_holders_percent", default=50)
+    top10_pct = top10_pct or 50
     if top10_pct < 30:
         score += 10
     elif top10_pct < 50:
         score += 5
-    # else 0 — concentrated = risky, no bonus
 
     return round(score, 1)
 
@@ -164,59 +162,50 @@ def compute_divergence_score(token: dict, netflow_map: dict) -> float:
 # ─────────────────────────────────────────────
 
 def run_detector():
-    print("\n" + "═" * 60)
-    print("  🔍 SMART MONEY DIVERGENCE DETECTOR")
+    print("\n" + "=" * 60)
+    print("  SMART MONEY DIVERGENCE DETECTOR")
     print(f"  Chains: {', '.join(CHAINS)}")
     print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
-    print("═" * 60 + "\n")
+    print("=" * 60 + "\n")
 
     all_tokens = []
     netflow_map = {}
 
     for chain in CHAINS:
-        print(f"▶ Scanning {chain.upper()}...")
+        print(f"Scanning {chain.upper()}...")
 
         screener_tokens = fetch_token_screener(chain)
-        netflow_tokens = fetch_smart_money_netflow(chain)
+        netflow_tokens  = fetch_smart_money_netflow(chain)
 
         # Build netflow lookup by token address
         for nf in netflow_tokens:
-            addr = nf.get("token_address", nf.get("address", ""))
+            addr = safe_get(nf, "token_address", "address", "contract", default="")
             if addr:
                 netflow_map[addr] = nf
 
-        # Tag each token with its chain
         for t in screener_tokens:
             t["_chain"] = chain
             all_tokens.append(t)
 
-        print(f"  ✓ Found {len(screener_tokens)} screener tokens, {len(netflow_tokens)} netflow entries\n")
+        print(f"  Found {len(screener_tokens)} screener tokens, "
+              f"{len(netflow_tokens)} netflow entries\n")
 
     if not all_tokens:
-        print("⚠️  No tokens returned. Check your API key and CLI installation.")
+        print("No tokens returned.")
+        print("-> Check credits at app.nansen.ai and make sure CLI is authenticated.")
         sys.exit(1)
 
     # Score every token
-    print("⚙️  Computing Divergence Index scores...\n")
+    print("Computing Divergence Index scores...\n")
     scored = []
     for token in all_tokens:
         score = compute_divergence_score(token, netflow_map)
-        if score > 0:
-            token["divergence_score"] = score
-            scored.append(token)
+        token["divergence_score"] = score
+        scored.append(token)
 
     # Sort and take top N
     scored.sort(key=lambda x: x["divergence_score"], reverse=True)
     top_tokens = scored[:TOP_N_RESULTS]
-
-    # Enrich top tokens with flow details (extra API calls for depth)
-    print(f"🔬 Enriching top {len(top_tokens)} tokens with flow data...\n")
-    for token in top_tokens:
-        addr = token.get("address", "")
-        chain = token.get("_chain", "ethereum")
-        if addr:
-            flows = fetch_token_flows(addr, chain)
-            token["_flows"] = flows
 
     return top_tokens
 
@@ -225,8 +214,12 @@ def run_detector():
 # 5. OUTPUT FORMATTING
 # ─────────────────────────────────────────────
 
-def format_number(n):
+def fmt(n):
     if n is None:
+        return "N/A"
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
         return "N/A"
     if abs(n) >= 1_000_000:
         return f"${n/1_000_000:.1f}M"
@@ -236,61 +229,67 @@ def format_number(n):
 
 
 def print_report(tokens: list[dict]):
-    print("\n" + "═" * 60)
-    print("  📊 TOP DIVERGENCE SIGNALS")
-    print("═" * 60)
-    print(f"  {'#':<3} {'Symbol':<10} {'Chain':<8} {'Score':<7} {'SM Flow':<12} {'Δ Price':<10} {'SM Traders'}")
-    print("  " + "─" * 58)
+    print("\n" + "=" * 65)
+    print("  TOP DIVERGENCE SIGNALS")
+    print("=" * 65)
+    print(f"  {'#':<3} {'Symbol':<10} {'Chain':<8} {'Score':<7} "
+          f"{'SM Flow':<12} {'Price 24h':<12} {'SM Traders'}")
+    print("  " + "-" * 61)
 
     for i, t in enumerate(tokens, 1):
-        symbol    = t.get("symbol", "???")[:9]
+        symbol    = str(safe_get(t, "symbol", "name", default="???"))[:9]
         chain     = t.get("_chain", "")[:7]
         score     = t.get("divergence_score", 0)
-        flow      = format_number(t.get("smart_money_net_flow_usd", t.get("net_flow_24h_usd", 0)))
-        price_chg = t.get("price_change_24h_pct", t.get("price_change_pct", 0)) or 0
-        traders   = t.get("smart_money_trader_count", t.get("nof_smart_money_traders", 0)) or 0
-        arrow     = "🔴" if price_chg < 0 else "🟢"
-        print(f"  {i:<3} {symbol:<10} {chain:<8} {score:<7} {flow:<12} {arrow}{price_chg:+.1f}%{'':<3} {traders}")
+        flow      = fmt(safe_get(t, "smart_money_net_flow_usd", "netflow_usd",
+                                 "net_flow_usd", default=0))
+        price_chg = safe_get(t, "price_change_24h_pct", "price_change_pct",
+                              "priceChange24h", default=0) or 0
+        traders   = safe_get(t, "smart_money_trader_count", "nof_smart_money_traders",
+                              "sm_traders", default=0) or 0
+        arrow     = "v" if price_chg < 0 else "^"
+        print(f"  {i:<3} {symbol:<10} {chain:<8} {score:<7} "
+              f"{flow:<12} {arrow}{price_chg:+.1f}%{'':<5} {traders}")
 
-    print("═" * 60 + "\n")
+    print("=" * 65 + "\n")
 
 
-def build_report_markdown(tokens: list[dict]) -> str:
+def build_markdown_report(tokens: list[dict]) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
-        f"# 🧠 Smart Money Divergence Report",
-        f"*Generated: {ts}*",
-        f"*Chains: {', '.join(CHAINS)} | Min Market Cap: {format_number(MIN_MARKET_CAP_USD)}*\n",
-        "## Top Divergence Signals\n",
-        "| # | Token | Chain | Score | SM Netflow | Price Δ | SM Traders |",
-        "|---|-------|-------|-------|------------|---------|------------|",
+        "# Smart Money Divergence Report",
+        f"*Generated: {ts}*\n",
+        "## Top Signals\n",
+        "| # | Token | Chain | Score | SM Netflow | Price 24h | SM Traders |",
+        "|---|-------|-------|-------|------------|-----------|------------|",
     ]
     for i, t in enumerate(tokens, 1):
-        symbol    = t.get("symbol", "???")
+        symbol    = str(safe_get(t, "symbol", "name", default="???"))
         chain     = t.get("_chain", "")
         score     = t.get("divergence_score", 0)
-        flow      = format_number(t.get("smart_money_net_flow_usd", t.get("net_flow_24h_usd", 0)))
-        price_chg = t.get("price_change_24h_pct", t.get("price_change_pct", 0)) or 0
-        traders   = t.get("smart_money_trader_count", t.get("nof_smart_money_traders", 0)) or 0
-        lines.append(f"| {i} | **{symbol}** | {chain} | {score} | {flow} | {price_chg:+.1f}% | {traders} |")
+        flow      = fmt(safe_get(t, "smart_money_net_flow_usd", "netflow_usd", default=0))
+        price_chg = safe_get(t, "price_change_24h_pct", "price_change_pct", default=0) or 0
+        traders   = safe_get(t, "smart_money_trader_count", "nof_smart_money_traders",
+                              "sm_traders", default=0) or 0
+        lines.append(f"| {i} | **{symbol}** | {chain} | {score} | "
+                     f"{flow} | {price_chg:+.1f}% | {traders} |")
 
     lines += [
         "\n## How to Read This",
-        "- **Divergence Score**: 0–100. Higher = stronger signal that SM is accumulating while retail fears.",
-        "- **SM Netflow**: Net USD flow from Smart Money wallets in last 24h (positive = buying).",
-        "- **Price Δ**: 24h price change. Negative + high SM flow = divergence opportunity.",
-        "- **SM Traders**: Number of distinct Smart Money wallets active in this token.",
-        "\n> ⚠️ Not financial advice. For educational/research use only.",
+        "- **Score**: 0-100. Higher = stronger divergence signal.",
+        "- **SM Netflow**: Net USD Smart Money flow in 24h (positive = buying).",
+        "- **Price 24h**: Negative + high SM flow = opportunity signal.",
+        "- **SM Traders**: Distinct Smart Money wallets active in this token.",
+        "\n> Not financial advice. For research use only.",
     ]
     return "\n".join(lines)
 
 
 def save_report(tokens: list[dict]):
-    md = build_report_markdown(tokens)
+    md = build_markdown_report(tokens)
     filename = f"report_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
     with open(filename, "w") as f:
         f.write(md)
-    print(f"📄 Report saved: {filename}")
+    print(f"Report saved: {filename}")
     return filename, md
 
 
@@ -299,8 +298,11 @@ def save_report(tokens: list[dict]):
 # ─────────────────────────────────────────────
 
 def send_telegram(message: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️  Telegram not configured — skipping alert.")
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+        print("Telegram not configured - skipping alert.")
+        return
+    if not TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID == "YOUR_TELEGRAM_CHAT_ID_HERE":
+        print("Telegram Chat ID not set - skipping alert.")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -312,32 +314,32 @@ def send_telegram(message: str):
     try:
         r = requests.post(url, json=payload, timeout=10)
         if r.status_code == 200:
-            print("✅ Telegram alert sent!")
+            print("Telegram alert sent!")
         else:
-            print(f"⚠️  Telegram error {r.status_code}: {r.text}")
+            print(f"Telegram error {r.status_code}: {r.text[:100]}")
     except Exception as e:
-        print(f"⚠️  Telegram failed: {e}")
+        print(f"Telegram failed: {e}")
 
 
 def build_telegram_message(tokens: list[dict]) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [
-        f"🧠 *Smart Money Divergence Alert*",
+        "*Smart Money Divergence Alert*",
         f"_{ts}_\n",
         f"Top {len(tokens)} signals across {', '.join(CHAINS)}:\n",
     ]
     for i, t in enumerate(tokens, 1):
-        symbol    = t.get("symbol", "???")
+        symbol    = str(safe_get(t, "symbol", "name", default="???"))
         chain     = t.get("_chain", "")
         score     = t.get("divergence_score", 0)
-        flow      = format_number(t.get("smart_money_net_flow_usd", t.get("net_flow_24h_usd", 0)))
-        price_chg = t.get("price_change_24h_pct", t.get("price_change_pct", 0)) or 0
-        emoji     = "🚨" if score >= 50 else "⚡"
+        flow      = fmt(safe_get(t, "smart_money_net_flow_usd", "netflow_usd", default=0))
+        price_chg = safe_get(t, "price_change_24h_pct", "price_change_pct", default=0) or 0
+        emoji     = "!!" if score >= 50 else "->"
         lines.append(
             f"{emoji} *{i}. {symbol}* [{chain}]\n"
-            f"   Score: `{score}` | SM Flow: `{flow}` | Δ`{price_chg:+.1f}%`"
+            f"   Score: `{score}` | Flow: `{flow}` | `{price_chg:+.1f}%`"
         )
-    lines.append("\n_Not financial advice. Built with Nansen CLI 🔍_")
+    lines.append("\n_Not financial advice. Built with Nansen CLI_")
     return "\n".join(lines)
 
 
@@ -348,9 +350,7 @@ def build_telegram_message(tokens: list[dict]) -> str:
 if __name__ == "__main__":
     top_tokens = run_detector()
     print_report(top_tokens)
-    filename, md = save_report(top_tokens)
-
+    save_report(top_tokens)
     tg_msg = build_telegram_message(top_tokens)
     send_telegram(tg_msg)
-
-    print("\n✅ Done. Share the report screenshot on X with #NansenCLI @nansen_ai\n")
+    print("Done! Screenshot the output table and post on X with #NansenCLI @nansen_ai\n")
