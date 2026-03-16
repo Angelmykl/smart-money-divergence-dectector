@@ -186,13 +186,10 @@ def compute_score(token: dict, netflow_map: dict) -> float:
                                          "netflow_usd", "net_flow_usd", default=0)) or 0
     if net_flow > 0:
         score += min(40, max(0, (math.log10(max(net_flow, 1)) - 3) * 13.3))
-    price_chg = safe_get(token, "price_change_24h_pct", "price_change_pct",
-                         "priceChange24h", "price_change", default=0) or 0
+    price_chg = safe_get(token, "price_change", "price_change_24h_pct", "price_change_pct", default=0) or 0
     if price_chg < 0:   score += min(30, abs(price_chg) * 1.5)
     elif price_chg < 5: score += 5
-    sm_traders = safe_get(token, "smart_money_trader_count",
-                          "nof_smart_money_traders", "sm_traders",
-                          "smart_money_count", default=0) or 0
+    sm_traders = safe_get(token, "nof_traders", "smart_money_trader_count", "sm_traders", default=0) or 0
     score += min(20, sm_traders * 2)
     top10 = safe_get(token, "top_10_holder_pct", "top10HolderPct", default=50) or 50
     if top10 < 30:   score += 10
@@ -311,35 +308,33 @@ if run_clicked:
 
     progress = st.progress(0, text="Calling Nansen API...")
 
-    # API Call 1: Token screener
-    progress.progress(0.3, text="📡 Fetching Smart Money token screener...")
-    screener_tokens = fetch_token_screener(selected_chains, nansen_key)
-
-    # Check for errors
-    if screener_tokens and "_error" in screener_tokens[0]:
-        st.error(f"❌ API Error: {screener_tokens[0]['_error']}")
-        st.stop()
-
-    # API Call 2: Smart Money flows
-    progress.progress(0.6, text="📡 Fetching Smart Money netflows...")
-    flow_tokens = fetch_smart_money_flows(selected_chains, nansen_key)
-
-    progress.progress(0.9, text="⚙️ Computing divergence scores...")
-
-    # Build netflow lookup
-    netflow_map = {}
-    for nf in flow_tokens:
-        addr = safe_get(nf, "token_address", "address", "contract", default="")
-        if addr:
-            netflow_map[addr] = nf
-
-    # Tag chain on screener tokens if not present
+    # Scan each chain separately to ensure all chains return results
     all_tokens = []
-    for t in screener_tokens:
-        if "_chain" not in t:
-            t["_chain"] = t.get("chain", selected_chains[0])
+    netflow_map = {}
+    steps = len(selected_chains)
+
+    for idx, chain in enumerate(selected_chains):
+        pct = 0.1 + (0.8 * idx / steps)
+        progress.progress(pct, text=f"📡 Scanning {chain.upper()}...")
+
+        chain_tokens = fetch_token_screener([chain], nansen_key)
+        if chain_tokens and "_error" in chain_tokens[0]:
+            st.warning(f"⚠️ {chain}: {chain_tokens[0]['_error']}")
+            continue
+
+        flow_tokens = fetch_smart_money_flows([chain], nansen_key)
+        for nf in flow_tokens:
+            addr = safe_get(nf, "token_address", "address", "contract", default="")
+            if addr:
+                netflow_map[addr] = nf
+
+        for t in chain_tokens:
+            t["_chain"] = t.get("chain", chain)
+            all_tokens.append(t)
+
+    progress.progress(0.95, text="⚙️ Computing divergence scores...")
+    for t in all_tokens:
         t["_score"] = compute_score(t, netflow_map)
-        all_tokens.append(t)
 
     results = sorted(
         [t for t in all_tokens if t["_score"] >= min_score],
@@ -350,10 +345,9 @@ if run_clicked:
     time.sleep(0.5)
     progress.empty()
 
-    st.session_state.results     = results
-    st.session_state.all_tokens  = all_tokens
-    st.session_state.last_run    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    st.session_state.api_calls   = 2 * len(selected_chains)
+    st.session_state.results    = results
+    st.session_state.all_tokens = all_tokens
+    st.session_state.last_run   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     # Telegram alert
     if tg_token and tg_chat_id and results:
@@ -408,7 +402,7 @@ if "results" in st.session_state and st.session_state.results:
             chain   = token.get("_chain", token.get("chain", ""))
             score   = token["_score"]
             flow    = fmt_usd(safe_get(token, "netflow", "smart_money_net_flow_usd", "net_flow_usd", default=0))
-            pc      = safe_get(token, "price_change", "price_change_24h_pct", "price_change_pct", default=0) or 0
+            pc      = safe_get(token, "price_change_24h_pct", "price_change_pct", "price_change", default=0) or 0
             traders = safe_get(token, "smart_money_trader_count",
                                "nof_smart_money_traders", "sm_traders",
                                "smart_money_count", default=0) or 0
@@ -416,12 +410,16 @@ if "results" in st.session_state and st.session_state.results:
             clr     = "#ff4444" if pc < 0 else "#00ff88"
             sc      = "score-high" if score >= 55 else ("score-medium" if score >= 30 else "score-low")
 
+            addr = safe_get(token, "token_address", "address", "contract", default="")
+            dex_url = f"https://dexscreener.com/search?q={addr}" if addr else "#"
+            addr_short = addr[:6] + "..." + addr[-4:] if len(addr) > 10 else addr
+
             st.markdown(f"""
             <div class="signal-card">
               <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
                 <div style="display:flex;align-items:center;gap:10px">
                   <span style="font-family:'Space Mono',monospace;color:#555;font-size:0.85rem">#{i:02d}</span>
-                  <span style="font-family:'Space Mono',monospace;font-weight:700;font-size:1.1rem;color:#e6edf3">{sym}</span>
+                  <a href="{dex_url}" target="_blank" style="font-family:'Space Mono',monospace;font-weight:700;font-size:1.1rem;color:#00ff88;text-decoration:none">{sym} ↗</a>
                   <span class="chain-badge chain-{chain.lower()}">{chain}</span>
                 </div>
                 <span class="score-badge {sc}">{score} pts</span>
@@ -433,6 +431,8 @@ if "results" in st.session_state and st.session_state.results:
                      <div style="font-family:'Space Mono',monospace;font-size:0.95rem;color:{clr}">{arrow} {abs(pc):.1f}%</div></div>
                 <div><div style="font-size:0.7rem;color:#555;text-transform:uppercase;letter-spacing:.07em">SM Traders</div>
                      <div style="font-family:'Space Mono',monospace;font-size:0.95rem;color:#e6edf3">{traders}</div></div>
+                <div><div style="font-size:0.7rem;color:#555;text-transform:uppercase;letter-spacing:.07em">Contract</div>
+                     <a href="{dex_url}" target="_blank" style="font-family:'Space Mono',monospace;font-size:0.8rem;color:#555;text-decoration:none">{addr_short}</a></div>
               </div>
             </div>""", unsafe_allow_html=True)
 
