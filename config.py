@@ -6,8 +6,8 @@
 # Step 2: Message your bot once, then visit:
 #         https://api.telegram.org/bot<TOKEN>/getUpdates
 # Step 3: Find "id" inside "chat" - that is your Chat ID
-TELEGRAM_BOT_TOKEN = "8700001711:AAFjIfzem9flIBcSmkTlbFgNrom5JlNu8NM"
-TELEGRAM_CHAT_ID   = "822161264"
+TELEGRAM_BOT_TOKEN =  "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+TELEGRAM_CHAT_ID   = "YOUR_TELEGRAM_CHAT_ID_HERE"
 
 # -- Chains to Monitor --
 # Available: ethereum, solana, base, bnb, arbitrum, polygon, optimism
