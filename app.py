@@ -1,11 +1,9 @@
 """
-Smart Money Divergence Detector — Streamlit Web App v2
-=======================================================
-- Users enter Nansen API key, Telegram Bot Token, Chat ID
-- Option to save credentials in browser (localStorage) or session only
-- User picks scan interval (15min, 30min, 1h, 4h, 12h, 24h)
-- Background scheduler fires scans automatically
-- Telegram alerts sent on every scheduled scan
+Smart Money Divergence Detector — Streamlit Web App
+=====================================================
+Users enter their own Nansen API key, Telegram Bot Token,
+and Telegram Chat ID. Results shown in a live dashboard.
+Supports 9 chains: ETH, SOL, BASE, BNB, ARB, POL, OP, AVAX, LINEA
 """
 
 import streamlit as st
@@ -15,11 +13,6 @@ import math
 import requests
 import time
 from datetime import datetime, timezone
-from apscheduler.schedulers.background import BackgroundScheduler
-
-# ─────────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────────
 
 st.set_page_config(
     page_title="Smart Money Divergence Detector",
@@ -27,73 +20,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-# Loading screen — shows while app initialises
-st.markdown("""
-<style>
-#loading-screen {
-    position: fixed; inset: 0; z-index: 99999;
-    background: #0d1117;
-    display: flex; align-items: center; justify-content: center;
-    flex-direction: column; gap: 16px;
-    transition: opacity 0.8s ease;
-    font-family: 'Space Mono', monospace;
-}
-#loading-screen.hide { opacity: 0; pointer-events: none; }
-.ld-brain { font-size: 3rem; animation: ldpulse 1.5s ease-in-out infinite; }
-@keyframes ldpulse {
-    0%,100%{filter:drop-shadow(0 0 8px rgba(0,255,136,0.4));}
-    50%{filter:drop-shadow(0 0 24px rgba(0,255,136,0.9));}
-}
-.ld-title { color:#00ff88; font-size:1.2rem; font-weight:700; letter-spacing:-0.02em; }
-.ld-sub   { color:#444; font-size:0.72rem; margin-top:-8px; }
-.ld-bar-wrap { width:220px; height:3px; background:#161b22; border-radius:4px; overflow:hidden; }
-.ld-bar { height:100%; width:40%; background:linear-gradient(90deg,transparent,#00ff88,transparent);
-          animation:ldscan 1.4s ease-in-out infinite; border-radius:4px; }
-@keyframes ldscan { 0%{transform:translateX(-150%);} 100%{transform:translateX(350%);} }
-.ld-status { color:#00ff88; font-size:0.7rem; opacity:0.6;
-             animation:ldblink 1.4s ease-in-out infinite; }
-@keyframes ldblink { 0%,100%{opacity:0.6;} 50%{opacity:0.2;} }
-.ld-chains { display:flex; gap:5px; flex-wrap:wrap; justify-content:center; max-width:260px; }
-.ld-pill { padding:2px 8px; border-radius:20px; font-size:0.62rem; font-weight:600;
-           letter-spacing:0.05em; border:1px solid; }
-</style>
-<div id="loading-screen">
-    <span class="ld-brain">🧠</span>
-    <div class="ld-title">Smart Money Detector</div>
-    <div class="ld-sub">#NansenCLI</div>
-    <div class="ld-bar-wrap"><div class="ld-bar"></div></div>
-    <div class="ld-status">INITIALIZING SCANNER...</div>
-    <div class="ld-chains">
-        <span class="ld-pill" style="background:#1a1f6e;color:#818cf8;border-color:#818cf8">ETH</span>
-        <span class="ld-pill" style="background:#1a3a2a;color:#00ff88;border-color:#00ff88">SOL</span>
-        <span class="ld-pill" style="background:#0d2244;color:#60a5fa;border-color:#60a5fa">BASE</span>
-        <span class="ld-pill" style="background:#2a2000;color:#f0b90b;border-color:#f0b90b">BNB</span>
-        <span class="ld-pill" style="background:#0d1f33;color:#28a0f0;border-color:#28a0f0">ARB</span>
-        <span class="ld-pill" style="background:#1a0d33;color:#8247e5;border-color:#8247e5">POL</span>
-        <span class="ld-pill" style="background:#330d0d;color:#ff0420;border-color:#ff0420">OP</span>
-        <span class="ld-pill" style="background:#330d0d;color:#e84142;border-color:#e84142">AVAX</span>
-        <span class="ld-pill" style="background:#0d1a2a;color:#61dfff;border-color:#61dfff">LINEA</span>
-    </div>
-</div>
-<script>
-// Dismiss loading screen as soon as Streamlit content appears
-function dismissLoader() {
-    var el = document.getElementById('loading-screen');
-    if (el) { el.classList.add('hide'); setTimeout(function(){ if(el.parentNode) el.parentNode.removeChild(el); }, 800); }
-}
-setTimeout(dismissLoader, 1500);
-var obs = new MutationObserver(function(mutations) {
-    var frame = document.querySelector('.main .block-container');
-    if (frame) { dismissLoader(); obs.disconnect(); }
-});
-obs.observe(document.body, {childList: true, subtree: true});
-</script>
-""", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────
-# CSS
-# ─────────────────────────────────────────────
 
 st.markdown("""
 <style>
@@ -150,16 +76,6 @@ st.markdown("""
         background: #00cc6e !important;
         box-shadow: 0 4px 20px rgba(0,255,136,0.3) !important;
     }
-    .scheduler-active {
-        background: rgba(0,255,136,0.08); border: 1px solid rgba(0,255,136,0.3);
-        border-radius: 10px; padding: 12px 16px;
-        font-size: 0.85rem; color: #00ff88; margin-bottom: 12px;
-    }
-    .scheduler-inactive {
-        background: rgba(100,100,100,0.08); border: 1px solid #21262d;
-        border-radius: 10px; padding: 12px 16px;
-        font-size: 0.85rem; color: #555; margin-bottom: 12px;
-    }
     .info-box {
         background: rgba(0,255,136,0.05); border: 1px solid rgba(0,255,136,0.2);
         border-radius: 10px; padding: 14px 18px;
@@ -169,26 +85,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# SESSION STATE DEFAULTS
-# ─────────────────────────────────────────────
-
-defaults = {
-    "results": [],
-    "last_run": None,
-    "scheduler_running": False,
-    "scheduler": None,
-    "scan_count": 0,
-    "auto_enabled": False,
-    "saved_nansen": "",
-    "saved_tg_token": "",
-    "saved_tg_chat": "",
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-# ─────────────────────────────────────────────
-# CORE FUNCTIONS
+# HELPERS
 # ─────────────────────────────────────────────
 
 def fmt_usd(n):
@@ -270,79 +167,6 @@ def send_telegram(bot_token, chat_id, message):
     except:
         return False
 
-def run_full_scan(api_key, tg_token, tg_chat, chains, min_score):
-    all_tokens, netflow_map = [], {}
-    for chain in chains:
-        screener = fetch_screener(chain, api_key)
-        netflow  = fetch_netflow(chain, api_key)
-        for nf in netflow:
-            addr = safe_get(nf, "token_address", "address", "contract", default="")
-            if addr: netflow_map[addr] = nf
-        for t in screener:
-            t["_chain"] = chain
-            all_tokens.append(t)
-    for t in all_tokens:
-        t["_score"] = compute_score(t, netflow_map)
-    results = sorted(
-        [t for t in all_tokens if t["_score"] >= min_score],
-        key=lambda x: x["_score"], reverse=True
-    )
-    st.session_state.results    = results
-    st.session_state.last_run   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    st.session_state.scan_count += 1
-    if tg_token and tg_chat and results:
-        top5  = results[:5]
-        lines = [f"*Smart Money Divergence Alert*\n_{st.session_state.last_run}_\n"]
-        for i, t in enumerate(top5, 1):
-            sym   = str(safe_get(t, "symbol", "name", default="???"))
-            chain = t.get("_chain", "")
-            score = t["_score"]
-            flow  = fmt_usd(safe_get(t, "smart_money_net_flow_usd", "netflow_usd", default=0))
-            pc    = safe_get(t, "price_change_24h_pct", "price_change_pct", default=0) or 0
-            lines.append(
-                f"{'!!' if score >= 55 else '->'} *{i}. {sym}* [{chain}]\n"
-                f"Score: `{score}` | Flow: `{flow}` | `{pc:+.1f}%`"
-            )
-        lines.append("\n_Not financial advice. Built with Nansen CLI_")
-        send_telegram(tg_token, tg_chat, "\n".join(lines))
-    return results
-
-# ─────────────────────────────────────────────
-# SCHEDULER
-# ─────────────────────────────────────────────
-
-INTERVAL_OPTIONS = {
-    "Every 15 minutes": 15,
-    "Every 30 minutes": 30,
-    "Every 1 hour":     60,
-    "Every 4 hours":    240,
-    "Every 12 hours":   720,
-    "Every 24 hours":   1440,
-}
-
-def start_scheduler(api_key, tg_token, tg_chat, chains, min_score, interval_mins):
-    stop_scheduler()
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(
-        run_full_scan, "interval",
-        minutes=interval_mins,
-        args=[api_key, tg_token, tg_chat, chains, min_score],
-        id="scan_job",
-        next_run_time=datetime.now(timezone.utc),
-    )
-    scheduler.start()
-    st.session_state.scheduler         = scheduler
-    st.session_state.scheduler_running = True
-    st.session_state.auto_enabled      = True
-
-def stop_scheduler():
-    if st.session_state.scheduler:
-        try: st.session_state.scheduler.shutdown(wait=False)
-        except: pass
-    st.session_state.scheduler         = None
-    st.session_state.scheduler_running = False
-    st.session_state.auto_enabled      = False
-
 # ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
@@ -352,59 +176,30 @@ with st.sidebar:
     st.markdown('<p class="subtitle">Smart Money Divergence</p>', unsafe_allow_html=True)
     st.markdown("---")
 
-    st.markdown("### 🔐 Credential Mode")
-    save_mode = st.radio(
-        "How to handle your keys:",
-        ["Session only (private)", "Save in browser (persistent)"],
-        help="Session only: keys disappear when tab closes. Save in browser: stored in localStorage."
-    )
-    save_to_browser = save_mode == "Save in browser (persistent)"
-
-    if save_to_browser:
-        st.markdown("""<div class="info-box">
-        Keys saved in <b>your browser only</b>. Never sent anywhere except
-        Nansen and Telegram APIs directly.
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown("---")
     st.markdown("### ⚙️ Your Credentials")
+    st.markdown("""<div class="info-box">
+    Your keys are used only for this session and are never stored or shared.
+    </div>""", unsafe_allow_html=True)
 
     nansen_key = st.text_input(
         "Nansen API Key", type="password",
-        value=st.session_state.get("saved_nansen", ""),
         placeholder="Paste your Nansen API key...",
         help="Get yours at app.nansen.ai → Settings → API"
     )
+
     st.markdown("---")
-    st.markdown("### 📬 Telegram Alerts")
+    st.markdown("### 📬 Telegram Alerts *(optional)*")
 
     tg_token = st.text_input(
         "Telegram Bot Token", type="password",
-        value=st.session_state.get("saved_tg_token", ""),
         placeholder="1234567890:AAF...",
         help="Get from @BotFather on Telegram"
     )
     tg_chat_id = st.text_input(
         "Telegram Chat ID",
-        value=st.session_state.get("saved_tg_chat", ""),
         placeholder="123456789",
         help="Visit api.telegram.org/bot<TOKEN>/getUpdates"
     )
-
-    if save_to_browser:
-        col_save, col_clear = st.columns(2)
-        with col_save:
-            if st.button("💾 Save keys"):
-                st.session_state.saved_nansen   = nansen_key
-                st.session_state.saved_tg_token = tg_token
-                st.session_state.saved_tg_chat  = tg_chat_id
-                st.success("Saved to session!")
-        with col_clear:
-            if st.button("🗑️ Clear keys"):
-                st.session_state.saved_nansen   = ""
-                st.session_state.saved_tg_token = ""
-                st.session_state.saved_tg_chat  = ""
-                st.rerun()
 
     st.markdown("---")
     st.markdown("### 🔗 Chains")
@@ -422,77 +217,49 @@ with st.sidebar:
     }
 
     selected_chains = []
-    chain_keys = list(ALL_CHAINS.keys())
     cols = st.columns(3)
-    for idx, chain_id in enumerate(chain_keys):
-        label, default = ALL_CHAINS[chain_id]
+    for idx, (chain_id, (label, default)) in enumerate(ALL_CHAINS.items()):
         with cols[idx % 3]:
             if st.checkbox(label, value=default, key=f"chain_{chain_id}"):
                 selected_chains.append(chain_id)
-
-    if not selected_chains:
-        st.warning("Select at least one chain.")
 
     st.markdown("---")
     st.markdown("### 🎚️ Min Score Filter")
     min_score = st.slider("Show tokens scoring above:", 0, 80, 20)
 
     st.markdown("---")
-    st.markdown("### ⏱️ Auto-Scan")
-    interval_label = st.selectbox("Scan every:", list(INTERVAL_OPTIONS.keys()), index=2)
-    interval_mins  = INTERVAL_OPTIONS[interval_label]
-
-    col_start, col_stop = st.columns(2)
-    with col_start:
-        if st.button("▶ Start"):
-            if not nansen_key:
-                st.error("Need API key!")
-            elif not selected_chains:
-                st.error("Pick a chain!")
-            else:
-                start_scheduler(nansen_key, tg_token, tg_chat_id,
-                                selected_chains, min_score, interval_mins)
-                st.success("Auto-scan started!")
-    with col_stop:
-        if st.button("⏹ Stop"):
-            stop_scheduler()
-            st.info("Stopped.")
-
-    if st.session_state.scheduler_running:
-        st.markdown(f"""<div class="scheduler-active">
-        ● Auto-scan ON — {interval_label}<br>
-        <span style="color:#aaa;font-size:0.75rem">Scans completed: {st.session_state.scan_count}</span>
-        </div>""", unsafe_allow_html=True)
-    else:
-        st.markdown("""<div class="scheduler-inactive">
-        ○ Auto-scan off
-        </div>""", unsafe_allow_html=True)
-
-    st.markdown('<p style="font-size:0.7rem;color:#555;text-align:center">Built with Nansen CLI · #NansenCLI</p>',
-                unsafe_allow_html=True)
+    st.markdown(
+        '<p style="font-size:0.7rem;color:#555;text-align:center">'
+        'Built with Nansen CLI · #NansenCLI</p>',
+        unsafe_allow_html=True
+    )
 
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
 
 st.markdown('<h1 class="main-title">Smart Money Divergence Detector</h1>', unsafe_allow_html=True)
-st.markdown('<p class="subtitle">Find tokens where Smart Money accumulates while retail is fearful — across 9 chains.</p>',
-            unsafe_allow_html=True)
+st.markdown(
+    '<p class="subtitle">Find tokens where Smart Money accumulates while retail is fearful '
+    '— across 9 chains.</p>', unsafe_allow_html=True
+)
 st.markdown("---")
 
-col_btn, col_status, col_ts = st.columns([2, 3, 3])
+col_btn, col_ts = st.columns([2, 4])
 with col_btn:
     run_clicked = st.button("🔍 Run Scan Now")
-with col_status:
-    if st.session_state.scheduler_running:
-        st.markdown(f'<p style="color:#00ff88;font-size:0.85rem;padding-top:12px">● Auto-scanning {interval_label.lower()}</p>',
-                    unsafe_allow_html=True)
 with col_ts:
-    if st.session_state.last_run:
-        st.markdown(f'<p style="color:#555;font-size:0.8rem;padding-top:12px">Last scan: {st.session_state.last_run}</p>',
-                    unsafe_allow_html=True)
+    if "last_run" in st.session_state and st.session_state.last_run:
+        st.markdown(
+            f'<p style="color:#555;font-size:0.8rem;padding-top:12px">'
+            f'Last scan: {st.session_state.last_run}</p>',
+            unsafe_allow_html=True
+        )
 
-# Manual scan
+# ─────────────────────────────────────────────
+# RUN SCAN
+# ─────────────────────────────────────────────
+
 if run_clicked:
     if not nansen_key:
         st.error("⚠️ Please enter your Nansen API key in the sidebar.")
@@ -501,33 +268,40 @@ if run_clicked:
         st.error("⚠️ Please select at least one chain.")
         st.stop()
 
-    progress = st.progress(0, text="Starting scan...")
-    steps, step = len(selected_chains) * 2, 0
     all_tokens, netflow_map = [], {}
+    steps, step = len(selected_chains) * 2, 0
+    progress = st.progress(0, text="Starting scan...")
 
     for chain in selected_chains:
         progress.progress(step / steps, text=f"📡 Token screener [{chain}]...")
         screener = fetch_screener(chain, nansen_key); step += 1
+
         progress.progress(step / steps, text=f"📡 SM netflow [{chain}]...")
         netflow  = fetch_netflow(chain, nansen_key);  step += 1
+
         for nf in netflow:
             addr = safe_get(nf, "token_address", "address", "contract", default="")
             if addr: netflow_map[addr] = nf
         for t in screener:
-            t["_chain"] = chain; all_tokens.append(t)
+            t["_chain"] = chain
+            all_tokens.append(t)
 
-    progress.progress(1.0, text="✅ Done!"); time.sleep(0.4); progress.empty()
+    progress.progress(1.0, text="✅ Scan complete!")
+    time.sleep(0.5)
+    progress.empty()
 
     for t in all_tokens:
         t["_score"] = compute_score(t, netflow_map)
+
     results = sorted(
         [t for t in all_tokens if t["_score"] >= min_score],
         key=lambda x: x["_score"], reverse=True
     )
-    st.session_state.results    = results
-    st.session_state.last_run   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    st.session_state.scan_count += 1
 
+    st.session_state.results  = results
+    st.session_state.last_run = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    # Telegram alert
     if tg_token and tg_chat_id and results:
         top5  = results[:5]
         lines = [f"*Smart Money Divergence Alert*\n_{st.session_state.last_run}_\n"]
@@ -536,14 +310,22 @@ if run_clicked:
             score = t["_score"]
             flow  = fmt_usd(safe_get(t, "smart_money_net_flow_usd", "netflow_usd", default=0))
             pc    = safe_get(t, "price_change_24h_pct", "price_change_pct", default=0) or 0
-            lines.append(f"{'!!' if score >= 55 else '->'} *{i}. {sym}* [{t.get('_chain','')}]\nScore: `{score}` | Flow: `{flow}` | `{pc:+.1f}%`")
+            lines.append(
+                f"{'!!' if score >= 55 else '->'} *{i}. {sym}* [{t.get('_chain','')}]\n"
+                f"Score: `{score}` | Flow: `{flow}` | `{pc:+.1f}%`"
+            )
         lines.append("\n_Not financial advice. Built with Nansen CLI_")
         ok = send_telegram(tg_token, tg_chat_id, "\n".join(lines))
-        st.success("📬 Telegram alert sent!") if ok else st.warning("⚠️ Telegram failed — check token and chat ID.")
+        if ok:  st.success("📬 Telegram alert sent!")
+        else:   st.warning("⚠️ Telegram alert failed — check your token and chat ID.")
 
-# Display results
-if st.session_state.results:
+# ─────────────────────────────────────────────
+# DISPLAY RESULTS
+# ─────────────────────────────────────────────
+
+if "results" in st.session_state and st.session_state.results:
     results = st.session_state.results
+
     m1, m2, m3, m4 = st.columns(4)
     with m1:
         st.markdown(f'<div class="metric-box"><div class="metric-value">{len(results)}</div><div class="metric-label">Signals found</div></div>', unsafe_allow_html=True)
@@ -564,7 +346,8 @@ if st.session_state.results:
         score   = token["_score"]
         flow    = fmt_usd(safe_get(token, "smart_money_net_flow_usd", "netflow_usd", default=0))
         pc      = safe_get(token, "price_change_24h_pct", "price_change_pct", default=0) or 0
-        traders = safe_get(token, "smart_money_trader_count", "nof_smart_money_traders", "sm_traders", default=0) or 0
+        traders = safe_get(token, "smart_money_trader_count",
+                           "nof_smart_money_traders", "sm_traders", default=0) or 0
         arrow   = "▼" if pc < 0 else "▲"
         clr     = "#ff4444" if pc < 0 else "#00ff88"
         sc      = "score-high" if score >= 55 else ("score-medium" if score >= 30 else "score-low")
@@ -591,25 +374,20 @@ if st.session_state.results:
 
 else:
     st.markdown("""
-    <div style="text-align:center;padding:60px 20px;color:#444">
+    <div style="text-align:center;padding:60px 20px">
         <div style="font-size:3rem">🧠</div>
         <div style="font-family:'Space Mono',monospace;font-size:1.1rem;color:#555;margin-top:12px">
-            Enter credentials in the sidebar<br>
-            then hit <span style="color:#00ff88">Run Scan Now</span>
-            or <span style="color:#00ff88">Start Auto</span>
+            Enter your credentials in the sidebar<br>
+            and hit <span style="color:#00ff88">Run Scan Now</span>
         </div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:32px">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:16px">
         <div class="metric-box"><div class="metric-value">40</div><div class="metric-label">pts SM Netflow</div><div style="font-size:0.75rem;color:#555;margin-top:6px">SM accumulation signal</div></div>
         <div class="metric-box"><div class="metric-value">30</div><div class="metric-label">pts Price drop</div><div style="font-size:0.75rem;color:#555;margin-top:6px">Retail fear = opportunity</div></div>
         <div class="metric-box"><div class="metric-value">20</div><div class="metric-label">pts SM traders</div><div style="font-size:0.75rem;color:#555;margin-top:6px">More wallets = stronger</div></div>
         <div class="metric-box"><div class="metric-value">10</div><div class="metric-label">pts Distribution</div><div style="font-size:0.75rem;color:#555;margin-top:6px">Low concentration = safer</div></div>
     </div>
-    <div style="margin-top:16px;padding:12px 16px;background:rgba(255,60,60,0.05);border:1px solid rgba(255,60,60,0.15);border-radius:8px;font-size:0.78rem;color:#666">
+    <div style="margin-top:16px;padding:12px 16px;background:rgba(255,60,60,0.05);
+        border:1px solid rgba(255,60,60,0.15);border-radius:8px;font-size:0.78rem;color:#666">
     Not financial advice. For research and educational purposes only.
     </div>""", unsafe_allow_html=True)
-
-# Auto-refresh while scheduler is running
-if st.session_state.scheduler_running:
-    time.sleep(3)
-    st.rerun()
