@@ -141,7 +141,7 @@ def fetch_token_screener(chains: list, api_key: str) -> list:
             "only_smart_money": True,
             "token_age_days": {"max": 365, "min": 1}
         },
-        "order_by": [{"field": "smart_money_net_flow_usd", "direction": "DESC"}]
+        "order_by": [{"field": "chain", "direction": "ASC"}]
     }
     data = nansen_post("token-screener", api_key, payload)
     if "error" in data:
