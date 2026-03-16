@@ -191,12 +191,18 @@ if run_clicked:
         st.error("⚠️ Please select at least one chain.")
         st.stop()
     progress = st.progress(0, text="Calling Nansen API...")
-    progress.progress(0.3, text="📡 Fetching Smart Money token screener...")
-    screener_tokens = fetch_token_screener(selected_chains, nansen_key)
-    if screener_tokens and isinstance(screener_tokens[0], dict) and "_error" in screener_tokens[0]:
-        st.error(f"❌ API Error: {screener_tokens[0]['_error']}")
-        st.stop()
-    progress.progress(0.6, text="📡 Fetching Smart Money netflows...")
+    screener_tokens = []
+    total = len(selected_chains)
+    for ci, chain in enumerate(selected_chains):
+        progress.progress(0.1 + (ci/total)*0.5, text=f"📡 Scanning {chain}...")
+        tokens = fetch_token_screener([chain], nansen_key)
+        if tokens and isinstance(tokens[0], dict) and "_error" in tokens[0]:
+            st.error(f"❌ API Error on {chain}: {tokens[0]['_error']}")
+            st.stop()
+        for t in tokens:
+            t["_chain"] = chain
+        screener_tokens.extend(tokens)
+    progress.progress(0.7, text="📡 Fetching Smart Money netflows...")
     flow_tokens = fetch_smart_money_flows(selected_chains, nansen_key)
     progress.progress(0.9, text="⚙️ Computing divergence scores...")
     netflow_map = {}
