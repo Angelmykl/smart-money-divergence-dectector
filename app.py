@@ -45,7 +45,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 """, unsafe_allow_html=True)
 
 NANSEN_BASE = "https://api.nansen.ai/api/v1"
-INTERVAL_OPTIONS = {"Every 15 min": 15, "Every 30 min": 30, "Every 1 hour": 60, "Every 2 hours": 120, "Every 4 hours": 240, "Every 12 hours": 720}
+INTERVAL_OPTIONS = {"Every 15 min": 15, "Every 30 min": 30, "Every 1 hour": 60, "Every 2 hours": 120, "Every 4 hours": 240, "Every 12 hours": 720, "Every 24 hours": 1440}
 
 # Session state defaults
 for k, v in {
